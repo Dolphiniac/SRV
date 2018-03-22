@@ -11,6 +11,9 @@
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
+#include <d3d11.h>
+#pragma comment( lib, "d3d11" )
+#pragma comment( lib, "dxgi" )
 #pragma comment( lib, "vulkan-1" )
 
 void DebuggerPrintf( const char * fmt, ... ) {
@@ -44,9 +47,31 @@ int WinMain( _In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LP
 	windowRect.right = windowRect.left + 1600;
 	windowRect.bottom = windowRect.top + 900;
 	AdjustWindowRect( &windowRect, windowStyles, FALSE );
-	HWND hwnd = CreateWindowEx( 0, windowClass.lpszClassName, "Vulkan Implementation Test", windowStyles, 
-					windowRect.left, windowRect.top, windowRect.right - windowRect.left, windowRect.bottom - windowRect.top, 
+	HWND hwnd = CreateWindowEx( 0, windowClass.lpszClassName, "Vulkan Implementation Test", windowStyles,
+					windowRect.left, windowRect.top, windowRect.right - windowRect.left, windowRect.bottom - windowRect.top,
 					NULL, NULL, hInstance, NULL );
+	HRESULT hresult;
+	DXGI_SWAP_CHAIN_DESC swapchainDesc;
+	memset( &swapchainDesc, 0, sizeof( swapchainDesc ) );
+	swapchainDesc.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	swapchainDesc.SampleDesc.Count = 1;
+	swapchainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	swapchainDesc.BufferCount = 1;
+	swapchainDesc.OutputWindow = hwnd;
+	swapchainDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+	swapchainDesc.Windowed = TRUE;
+	swapchainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
+	IDXGISwapChain * dSwapchain;
+	IDXGIFactory1 * dxgiFactory;
+	hresult = CreateDXGIFactory1( IID_PPV_ARGS( &dxgiFactory ) );
+	IDXGIAdapter1 * adapter;
+	hresult = dxgiFactory->EnumAdapters1( 0, &adapter );
+	dxgiFactory->Release();
+	hresult = D3D11CreateDeviceAndSwapChain( adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &swapchainDesc, &dSwapchain, NULL, NULL, NULL );
+	IDXGISurface1 * dSurface;
+	hresult = dSwapchain->GetBuffer( 0, IID_PPV_ARGS( &dSurface ) );
+	HDC dc;
+	hresult = dSurface->GetDC( TRUE, &dc );
 	ULONG_PTR token;
 	Gdiplus::GdiplusStartupInput input;
 
@@ -207,4 +232,53 @@ int WinMain( _In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LP
 
 	VkImage * swapchainImages = new VkImage[ swapchainImageCount ];
 	result = vkGetSwapchainImagesKHR( device, swapchain, &swapchainImageCount, swapchainImages );
+
+	VkAttachmentDescription attachments[] = {
+		{
+			/* VkAttachmentDescriptionFlags    flags;		   */ 0,
+			/* VkFormat                        format;		   */ VK_FORMAT_R8G8B8A8_UNORM,
+			/* VkSampleCountFlagBits           samples;		   */ VK_SAMPLE_COUNT_1_BIT,
+			/* VkAttachmentLoadOp              loadOp;		   */ VK_ATTACHMENT_LOAD_OP_CLEAR,
+			/* VkAttachmentStoreOp             storeOp;		   */ VK_ATTACHMENT_STORE_OP_STORE,
+			/* VkAttachmentLoadOp              stencilLoadOp;  */ VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			/* VkAttachmentStoreOp             stencilStoreOp; */ VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			/* VkImageLayout                   initialLayout;  */ VK_IMAGE_LAYOUT_UNDEFINED,
+			/* VkImageLayout                   finalLayout;	   */ VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+		}
+	};
+
+	VkAttachmentReference colorAttachments[] = {
+		{
+			/* uint32_t         attachment;	*/ 0,
+			/* VkImageLayout    layout;		*/ VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+		}
+	};
+
+	VkSubpassDescription subpasses[] = {
+		{
+			/* VkSubpassDescriptionFlags       flags;					*/ 0,
+			/* VkPipelineBindPoint             pipelineBindPoint;		*/ VK_PIPELINE_BIND_POINT_GRAPHICS,
+			/* uint32_t                        inputAttachmentCount;	*/ 0,
+			/* const VkAttachmentReference*    pInputAttachments;		*/ NULL,
+			/* uint32_t                        colorAttachmentCount;	*/ ARRAY_LENGTH( colorAttachments ),
+			/* const VkAttachmentReference*    pColorAttachments;		*/ colorAttachments,
+			/* const VkAttachmentReference*    pResolveAttachments;		*/ NULL,
+			/* const VkAttachmentReference*    pDepthStencilAttachment;	*/ NULL,
+			/* uint32_t                        preserveAttachmentCount;	*/ 0,
+			/* const uint32_t*                 pPreserveAttachments;	*/ NULL
+		}
+	};
+
+	VkRenderPassCreateInfo renderPassCreateInfo;
+	memset( &renderPassCreateInfo, 0, sizeof( renderPassCreateInfo ) );
+	renderPassCreateInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	renderPassCreateInfo.attachmentCount = ARRAY_LENGTH( attachments );
+	renderPassCreateInfo.pAttachments = attachments;
+	renderPassCreateInfo.subpassCount = ARRAY_LENGTH( subpasses );
+	renderPassCreateInfo.pSubpasses = subpasses;
+
+	VkRenderPass renderPass;
+	result = vkCreateRenderPass( device, &renderPassCreateInfo, NULL, &renderPass );
+
+
 }

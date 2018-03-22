@@ -115,7 +115,7 @@ static const char * supportedInstanceExtensions[] = {
 };
 
 template< typename __enumType__ >
-class VkFlags {
+class VkBitFlags {
 public:
 	bool CheckFlag( __enumType__ flag ) const { return ( flags & ( uint64 )flag ) != 0; }
 	bool CheckFlag( uint64 flag ) const { return ( flags & flag ) != 0; }
@@ -130,7 +130,7 @@ public:
 private:
 	uint64 flags;
 };
-typedef VkFlags< instanceExtensions_t > VkInstanceExtensionFlags;
+typedef VkBitFlags< instanceExtensions_t > VkInstanceExtensionFlags;
 
 struct VkInstance_t : VkDispatchObject_t {
 	static const uint32	PHYSICAL_DEVICE_COUNT = 1;
@@ -391,7 +391,7 @@ void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties( VkPhysicalDevice vPhys
 enum class deviceExtension_t {
 	SWAPCHAIN_KHR = BIT( 0 )
 };
-typedef VkFlags< deviceExtension_t > idDeviceExtensionFlags;
+typedef VkBitFlags< deviceExtension_t > idDeviceExtensionFlags;
 static const char * supportedDeviceExtensions[] = {
 	VK_KHR_SWAPCHAIN_EXTENSION_NAME
 };
@@ -421,12 +421,14 @@ struct VkSwapchain_t : public VkDeviceObject_t {
 	VkImageUsageFlags		imageUsage;
 	VkSwapchainImage_t *	pImages;
 	uint32					imageCount;
+	uint32					inUseImageCount;
 };
 
 enum class handleClass_t {
 	SWAPCHAIN = 1,	//Can't start at 0, or we'd get a handle with all 0s, which indicates VK_NULL_HANDLE
 	IMAGE,
 	DEVICE_MEMORY,
+	RENDER_PASS,
 };
 
 #define HANDLE_CLASS_BITS 16
@@ -443,6 +445,17 @@ struct VkDeviceMemory_t : public VkDeviceObject_t {
 	void * data;
 };
 
+struct VkAttachmentDescription_t {
+	VkFormat			format;
+	VkAttachmentLoadOp	loadOp;
+	VkAttachmentStoreOp storeOp;
+};
+
+struct VkRenderPass_t : public VkDeviceObject_t {
+	VkAttachmentDescription_t *	pAttachments;
+	uint32						attachmentCount;
+};
+
 struct VkDevice_t : public VkDispatchObject_t {
 	VkPhysicalDevice_t *		physicalDevice;
 	idDeviceExtensionFlags		enabledExtensions;
@@ -455,6 +468,8 @@ struct VkDevice_t : public VkDispatchObject_t {
 	uint64						currentImageHandle;
 	VkDeviceMemory_t *			pMemories;
 	uint64						currentMemoryHandle;
+	VkRenderPass_t *			pRenderPasses;
+	uint64						currentRenderPassHandle;
 };
 
 VkResult VKAPI_CALL vkCreateDevice( VkPhysicalDevice vPhysicalDevice, const VkDeviceCreateInfo * pCreateInfo, const VkAllocationCallbacks * pAllocator, VkDevice * pDevice ) {
@@ -743,7 +758,7 @@ VkResult VKAPI_CALL vkAllocateMemory( VkDevice vDevice, const VkMemoryAllocateIn
 	device->pMemories = reinterpret_cast< VkDeviceMemory_t * >( allocator->pfnReallocation( allocator->pUserData, device->pMemories, sizeof( VkDeviceMemory_t ) * device->currentMemoryHandle, 4, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE ) );
 	VkDeviceMemory_t * memory = &device->pMemories[ baseHandle ];
 	memory->valid = true;
-	memory->data = malloc( pAllocateInfo->allocationSize );
+	memory->data = defaultAllocator.pfnAllocation( NULL, pAllocateInfo->allocationSize, 16, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE );
 	*pMemory = reinterpret_cast< VkDeviceMemory >( ENCODE_OBJECT_HANDLE( handleClass_t::DEVICE_MEMORY, baseHandle ) );
 	return VK_SUCCESS;
 }
@@ -763,7 +778,7 @@ VkResult VKAPI_CALL vkBindImageMemory( VkDevice vDevice, VkImage vImage, VkDevic
 void VKAPI_CALL vkFreeMemory( VkDevice vDevice, VkDeviceMemory vMemory, const VkAllocationCallbacks * ) {
 	VkDevice_t * device = reinterpret_cast< VkDevice_t * >( vDevice );
 	VkDeviceMemory_t * memory = &device->pMemories[ DECODE_OBJECT_HANDLE( vMemory ) ];
-	free( memory->data );
+	defaultAllocator.pfnFree( NULL, memory->data );
 	memset( memory, 0, sizeof( *memory ) );
 	do {
 		device->currentMemoryHandle--;
@@ -835,6 +850,8 @@ VkResult Swapchain_Init( VkSwapchain_t * swapchain, const VkAllocationCallbacks 
 		VK_ASSERT_SUBCALL( result );
 	}
 
+	return VK_SUCCESS;
+
 VK_SUBCALL_FAILED_LABEL:
 	for ( uint32 i = 0; i < swapchain->imageCount; i++ ) {
 		vkFreeMemory( vDevice, swapchain->pImages[ i ].memory, pAllocator );
@@ -846,9 +863,9 @@ VK_SUBCALL_FAILED_LABEL:
 VkResult VKAPI_CALL vkCreateSwapchainKHR( VkDevice vDevice, const VkSwapchainCreateInfoKHR * pCreateInfo, const VkAllocationCallbacks * pAllocator, VkSwapchainKHR * pSwapchain ) {
 	const VkAllocationCallbacks * allocator = ( pAllocator != NULL ) ? pAllocator : &defaultAllocator;
 	VkDevice_t * device = reinterpret_cast< VkDevice_t * >( vDevice );
-	VK_VALIDATE( device->enabledExtensions.CheckFlag( deviceExtension_t::SWAPCHAIN_KHR ) );
 	uint64 baseHandle = device->currentSwapchainHandle;
 	device->currentSwapchainHandle++;
+	VK_VALIDATE( device->enabledExtensions.CheckFlag( deviceExtension_t::SWAPCHAIN_KHR ) );
 	device->pSwapchains = reinterpret_cast< VkSwapchain_t * >( allocator->pfnReallocation( allocator->pUserData, device->pSwapchains, sizeof( VkSwapchain_t ) * device->currentSwapchainHandle, 4, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE ) );
 	VkSwapchain_t * swapchain = &device->pSwapchains[ baseHandle ];
 	memset( swapchain, 0, sizeof( *swapchain ) );
@@ -912,7 +929,7 @@ VK_ICD_EXPORT PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr( VkInstanc
 	return ( PFN_vkVoidFunction )_strdup( pName );
 }
 
-VkResult vkGetSwapchainImagesKHR( VkDevice vDevice, VkSwapchainKHR vSwapchain, uint32 * pSwapchainImageCount, VkImage * pSwapchainImages ) {
+VkResult VKAPI_CALL vkGetSwapchainImagesKHR( VkDevice vDevice, VkSwapchainKHR vSwapchain, uint32 * pSwapchainImageCount, VkImage * pSwapchainImages ) {
 	VkDevice_t * device = reinterpret_cast< VkDevice_t * >( vDevice );
 	uint64 handle = DECODE_OBJECT_HANDLE( vSwapchain );
 	VkSwapchain_t * swapchain = &device->pSwapchains[ handle ];
@@ -923,13 +940,53 @@ VkResult vkGetSwapchainImagesKHR( VkDevice vDevice, VkSwapchainKHR vSwapchain, u
 
 	uint32 imagesToWrite = Min( *pSwapchainImageCount, swapchain->imageCount );
 	for ( uint32 i = 0; i < imagesToWrite; i++ ) {
-
+		pSwapchainImages[ i ] = swapchain->pImages[ i ].image;
+	}
+	*pSwapchainImageCount = imagesToWrite;
+	swapchain->inUseImageCount = imagesToWrite;
+	if ( imagesToWrite < swapchain->imageCount ) {
+		return VK_INCOMPLETE;
 	}
 
 	return VK_SUCCESS;
 }
 
+VkResult RenderPass_Init( VkRenderPass_t * renderPass, const VkRenderPassCreateInfo * pCreateInfo, const VkAllocationCallbacks * pAllocator ) {
+	renderPass->pAttachments = reinterpret_cast< VkAttachmentDescription_t * >( pAllocator->pfnAllocation( pAllocator->pUserData, sizeof( VkAttachmentDescription_t ) * pCreateInfo->attachmentCount, 4, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE ) );
+	renderPass->attachmentCount = pCreateInfo->attachmentCount;
+	for ( uint32 i = 0; i < renderPass->attachmentCount; i++ ) {
+		VkAttachmentDescription_t * dst = &renderPass->pAttachments[ i ];
+		memset( dst, 0, sizeof( *dst ) );
+		const VkAttachmentDescription * src = &pCreateInfo->pAttachments[ i ];
+		dst->format = src->format;
+		dst->loadOp = src->loadOp;
+		dst->storeOp = src->storeOp;
+	}
+
+	return VK_SUCCESS;
+}
+
+VkResult VKAPI_CALL vkCreateRenderPass( VkDevice vDevice, const VkRenderPassCreateInfo * pCreateInfo, const VkAllocationCallbacks * pAllocator, VkRenderPass * pRenderPass ) {
+	VkDevice_t * device = reinterpret_cast< VkDevice_t * >( vDevice );
+	const VkAllocationCallbacks * allocator = ( pAllocator != NULL ) ? pAllocator : &defaultAllocator;
+	uint64 baseHandle = device->currentRenderPassHandle;
+	device->currentRenderPassHandle++;
+	device->pRenderPasses = reinterpret_cast< VkRenderPass_t * >( allocator->pfnReallocation( allocator->pUserData, device->pRenderPasses, sizeof( VkRenderPass_t ) * device->currentRenderPassHandle, 4, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE ) );
+	VkRenderPass_t * renderPass = &device->pRenderPasses[ baseHandle ];
+	memset( renderPass, 0, sizeof( *renderPass ) );
+	renderPass->valid = true;
+	VkResult result = RenderPass_Init( renderPass, pCreateInfo, allocator );
+	VK_ASSERT_SUBCALL( result );
+	*pRenderPass = reinterpret_cast< VkRenderPass >( ENCODE_OBJECT_HANDLE( handleClass_t::RENDER_PASS, baseHandle ) );
+
+	return VK_SUCCESS;
+
+VK_SUBCALL_FAILED_LABEL:
+	return result;
+}
+
 PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr( VkDevice device, const char * pName ) {
 	VK_PATCH_FUNCTION( vkGetSwapchainImagesKHR );
+	VK_PATCH_FUNCTION( vkCreateRenderPass );
 	return ( PFN_vkVoidFunction )_strdup( pName );
 }
