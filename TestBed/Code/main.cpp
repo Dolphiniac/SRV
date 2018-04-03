@@ -12,9 +12,12 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 #include <d3d11.h>
+#include <dxgi1_3.h>
 #pragma comment( lib, "d3d11" )
 #pragma comment( lib, "dxgi" )
 #pragma comment( lib, "vulkan-1" )
+
+#define VK_ASSERT( result ) do { if ( ( result ) != VK_SUCCESS ) { __debugbreak(); } } while ( false )
 
 void DebuggerPrintf( const char * fmt, ... ) {
 	char buff[ 2048 ];
@@ -36,7 +39,6 @@ int WinMain( _In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LP
 	windowClass.hIcon = NULL;
 	windowClass.hCursor = LoadCursor( hInstance, IDC_ARROW );
 	windowClass.lpszClassName = "Default Window Class";
-
 	RegisterClassEx( &windowClass );
 
 	DWORD windowStyles = WS_CAPTION | WS_POPUP | WS_VISIBLE;
@@ -50,28 +52,7 @@ int WinMain( _In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LP
 	HWND hwnd = CreateWindowEx( 0, windowClass.lpszClassName, "Vulkan Implementation Test", windowStyles,
 					windowRect.left, windowRect.top, windowRect.right - windowRect.left, windowRect.bottom - windowRect.top,
 					NULL, NULL, hInstance, NULL );
-	HRESULT hresult;
-	DXGI_SWAP_CHAIN_DESC swapchainDesc;
-	memset( &swapchainDesc, 0, sizeof( swapchainDesc ) );
-	swapchainDesc.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-	swapchainDesc.SampleDesc.Count = 1;
-	swapchainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-	swapchainDesc.BufferCount = 1;
-	swapchainDesc.OutputWindow = hwnd;
-	swapchainDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-	swapchainDesc.Windowed = TRUE;
-	swapchainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
-	IDXGISwapChain * dSwapchain;
-	IDXGIFactory1 * dxgiFactory;
-	hresult = CreateDXGIFactory1( IID_PPV_ARGS( &dxgiFactory ) );
-	IDXGIAdapter1 * adapter;
-	hresult = dxgiFactory->EnumAdapters1( 0, &adapter );
-	dxgiFactory->Release();
-	hresult = D3D11CreateDeviceAndSwapChain( adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &swapchainDesc, &dSwapchain, NULL, NULL, NULL );
-	IDXGISurface1 * dSurface;
-	hresult = dSwapchain->GetBuffer( 0, IID_PPV_ARGS( &dSurface ) );
-	HDC dc;
-	hresult = dSurface->GetDC( TRUE, &dc );
+
 	ULONG_PTR token;
 	Gdiplus::GdiplusStartupInput input;
 
@@ -118,12 +99,15 @@ int WinMain( _In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LP
 	LoadLibraryA( "SoftwareVulkan.dll" );
 	VkInstance instance;
 	VkResult result = vkCreateInstance( &instanceCreateInfo, NULL, &instance );
+	VK_ASSERT( result );
 
 	uint32 physicalDeviceCount;
-	vkEnumeratePhysicalDevices( instance, &physicalDeviceCount, NULL );
+	result = vkEnumeratePhysicalDevices( instance, &physicalDeviceCount, NULL );
+	VK_ASSERT( result );
 
 	VkPhysicalDevice * devices = new VkPhysicalDevice[ physicalDeviceCount ];
-	vkEnumeratePhysicalDevices( instance, &physicalDeviceCount, devices );
+	result = vkEnumeratePhysicalDevices( instance, &physicalDeviceCount, devices );
+	VK_ASSERT( result );
 
 	VkPhysicalDevice physicalDevice = NULL;
 	for ( uint32 i = 0; i < physicalDeviceCount; i++ ) {
@@ -170,7 +154,8 @@ int WinMain( _In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LP
 	deviceCreateInfo.queueCreateInfoCount = 1;
 	deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
 	VkDevice device;
-	vkCreateDevice( physicalDevice, &deviceCreateInfo, NULL, &device );
+	result = vkCreateDevice( physicalDevice, &deviceCreateInfo, NULL, &device );
+	VK_ASSERT( result );
 
 	delete[] queueFamilyProperties;
 
@@ -181,25 +166,32 @@ int WinMain( _In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LP
 	surfaceCreateInfo.hwnd = hwnd;
 
 	VkSurfaceKHR surface;
-	vkCreateWin32SurfaceKHR( instance, &surfaceCreateInfo, NULL, &surface );
+	result = vkCreateWin32SurfaceKHR( instance, &surfaceCreateInfo, NULL, &surface );
+	VK_ASSERT( result );
 
 	VkBool32 supported;
 	result = vkGetPhysicalDeviceSurfaceSupportKHR( physicalDevice, 0, surface, &supported );
+	VK_ASSERT( result );
 
 	VkSurfaceCapabilitiesKHR surfaceCapabilities;
 	result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR( physicalDevice, surface, &surfaceCapabilities );
+	VK_ASSERT( result );
 
 	uint32 surfaceFormatCount;
 	result = vkGetPhysicalDeviceSurfaceFormatsKHR( physicalDevice, surface, &surfaceFormatCount, NULL );
+	VK_ASSERT( result );
 
 	VkSurfaceFormatKHR * surfaceFormats = new VkSurfaceFormatKHR[ surfaceFormatCount ];
 	result = vkGetPhysicalDeviceSurfaceFormatsKHR( physicalDevice, surface, &surfaceFormatCount, surfaceFormats );
+	VK_ASSERT( result );
 
 	uint32 presentModeCount;
 	result = vkGetPhysicalDeviceSurfacePresentModesKHR( physicalDevice, surface, &presentModeCount, NULL );
+	VK_ASSERT( result );
 
 	VkPresentModeKHR * presentModes = new VkPresentModeKHR[ presentModeCount ];
 	result = vkGetPhysicalDeviceSurfacePresentModesKHR( physicalDevice, surface, &presentModeCount, presentModes );
+	VK_ASSERT( result );
 
 	VkPresentModeKHR desiredPresentMode = VK_PRESENT_MODE_FIFO_KHR;
 	for ( uint32 i = 0; i < presentModeCount; i++ ) {
@@ -223,15 +215,17 @@ int WinMain( _In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LP
 	swapchainCreateInfoKHR.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
 	swapchainCreateInfoKHR.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 	swapchainCreateInfoKHR.presentMode = desiredPresentMode;
-
 	VkSwapchainKHR swapchain;
 	result = vkCreateSwapchainKHR( device, &swapchainCreateInfoKHR, NULL, &swapchain );
+	VK_ASSERT( result );
 
 	uint32 swapchainImageCount;
 	result = vkGetSwapchainImagesKHR( device, swapchain, &swapchainImageCount, NULL );
+	VK_ASSERT( result );
 
 	VkImage * swapchainImages = new VkImage[ swapchainImageCount ];
 	result = vkGetSwapchainImagesKHR( device, swapchain, &swapchainImageCount, swapchainImages );
+	VK_ASSERT( result );
 
 	VkAttachmentDescription attachments[] = {
 		{
@@ -279,6 +273,7 @@ int WinMain( _In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LP
 
 	VkRenderPass renderPass;
 	result = vkCreateRenderPass( device, &renderPassCreateInfo, NULL, &renderPass );
+	VK_ASSERT( result );
 
 
 }

@@ -4,6 +4,11 @@
 #include <windows.h>
 #include <string.h>
 #include <vector>
+#include <dxgi.h>
+#include <d3d11.h>
+
+#pragma comment( lib, "dxgi" )
+#pragma comment( lib, "d3d11" )
 
 #define VK_ICD_EXPORT extern "C" __declspec( dllexport )
 #define VK_PATCH_FUNCTION( funcName ) do {\
@@ -414,7 +419,15 @@ struct VkSwapchainImage_t {
 	VkDeviceMemory	memory;
 };
 
+struct VkInternalImage_t {
+	HBITMAP	bitmap;
+	HDC		dc;
+};
+
 struct VkSwapchain_t : public VkDeviceObject_t {
+	IDXGISwapChain *		internalSwapchain;
+	IDXGISurface1 *			internalBackbuffer;
+	VkInternalImage_t *		pInternalImages;
 	VkExtent2D				extent;
 	VkFormat				imageFormat;
 	VkPresentModeKHR		presentMode;
@@ -422,6 +435,8 @@ struct VkSwapchain_t : public VkDeviceObject_t {
 	VkSwapchainImage_t *	pImages;
 	uint32					imageCount;
 	uint32					inUseImageCount;
+	double					performanceFrequency;
+	double					approximateSyncInterval;
 };
 
 enum class handleClass_t {
@@ -603,7 +618,7 @@ VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR( VkPhysicalDevice 
 	}
 
 	pSurfaceCapabilities->minImageCount = 2;
-	pSurfaceCapabilities->maxImageCount = 3;
+	pSurfaceCapabilities->maxImageCount = 2;
 	pSurfaceCapabilities->currentExtent = { ( uint32 )rect.right - rect.left, ( uint32 )rect.bottom - rect.top };
 	pSurfaceCapabilities->minImageExtent = pSurfaceCapabilities->currentExtent;
 	pSurfaceCapabilities->maxImageExtent = pSurfaceCapabilities->currentExtent;
@@ -629,10 +644,6 @@ VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR( VkPhysicalDevice physi
 VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR( VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, uint32 * pSurfaceFormatCount, VkSurfaceFormatKHR * pSurfaceFormats ) {
 	static VkSurfaceFormatKHR supportedFormats[] = {
 		{
-			VK_FORMAT_R8G8B8A8_UNORM,
-			VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-		},
-		{
 			VK_FORMAT_B8G8R8A8_UNORM,
 			VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
 		}
@@ -656,8 +667,7 @@ VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR( VkPhysicalDevice physi
 
 VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR( VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, uint32 * pPresentModeCount, VkPresentModeKHR * pPresentModes ) {
 	static VkPresentModeKHR supportedPresentModes[] = {
-		VK_PRESENT_MODE_FIFO_KHR,
-		VK_PRESENT_MODE_MAILBOX_KHR
+		VK_PRESENT_MODE_FIFO_KHR
 	};
 	if ( pPresentModes == NULL ) {
 		*pPresentModeCount = ARRAY_LENGTH( supportedPresentModes );
@@ -776,6 +786,9 @@ VkResult VKAPI_CALL vkBindImageMemory( VkDevice vDevice, VkImage vImage, VkDevic
 }
 
 void VKAPI_CALL vkFreeMemory( VkDevice vDevice, VkDeviceMemory vMemory, const VkAllocationCallbacks * ) {
+	if ( vMemory == VK_NULL_HANDLE ) {
+		return;
+	}
 	VkDevice_t * device = reinterpret_cast< VkDevice_t * >( vDevice );
 	VkDeviceMemory_t * memory = &device->pMemories[ DECODE_OBJECT_HANDLE( vMemory ) ];
 	defaultAllocator.pfnFree( NULL, memory->data );
@@ -787,6 +800,9 @@ void VKAPI_CALL vkFreeMemory( VkDevice vDevice, VkDeviceMemory vMemory, const Vk
 }
 
 void VKAPI_CALL vkDestroyImage( VkDevice vDevice, VkImage vImage, const VkAllocationCallbacks * ) {
+	if ( vImage == VK_NULL_HANDLE ) {
+		return;
+	}
 	VkDevice_t * device = reinterpret_cast< VkDevice_t * >( vDevice );
 	VkImage_t * image = &device->pImages[ DECODE_OBJECT_HANDLE( vImage ) ];
 	memset( image, 0, sizeof( *image ) );
@@ -796,10 +812,80 @@ void VKAPI_CALL vkDestroyImage( VkDevice vDevice, VkImage vImage, const VkAlloca
 	device->currentImageHandle++;
 }
 
-VkResult Swapchain_Init( VkSwapchain_t * swapchain, const VkAllocationCallbacks * pAllocator, VkDevice vDevice ) {
-	if ( swapchain->presentMode == VK_PRESENT_MODE_MAILBOX_KHR ) {
-		swapchain->imageCount = 3;
+void Swapchain_InitializePresentTiming( VkSwapchain_t * swapchain ) {
+	LARGE_INTEGER freq;
+	QueryPerformanceFrequency( &freq );
+	//First, store the frequency, so we can do timing
+	swapchain->performanceFrequency = static_cast< double >( freq.QuadPart );
+	//Next, we need to get an approximation of the time between two vertical blanks
+	//To do this, we'll ensure a sync as the starting time, then sync to the next blank for an ending time
+	LARGE_INTEGER startCounter;
+	LARGE_INTEGER endCounter;
+	//We pump a few times to normalize the interval (first few frames seem to have erratic syncs)
+	const uint32 TEST_FRAME = 5;
+	for ( uint32 i = 0; i < TEST_FRAME; i++ ) {
+		swapchain->internalSwapchain->Present( 1, 0 );
 	}
+	QueryPerformanceCounter( &startCounter );
+	swapchain->internalSwapchain->Present( 1, 0 );
+	QueryPerformanceCounter( &endCounter );
+	swapchain->approximateSyncInterval = static_cast< double >( endCounter.QuadPart - startCounter.QuadPart );
+}
+
+VkResult Swapchain_Init( VkSwapchain_t * swapchain, const VkAllocationCallbacks * pAllocator, VkDevice vDevice, VkIcdSurfaceWin32 * surface ) {
+	DXGI_SWAP_CHAIN_DESC internalSwapchainDesc;
+	memset( &internalSwapchainDesc, 0, sizeof( internalSwapchainDesc ) );
+	internalSwapchainDesc.BufferCount = 1;
+	internalSwapchainDesc.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	internalSwapchainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	internalSwapchainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
+	internalSwapchainDesc.OutputWindow = surface->hwnd;
+	internalSwapchainDesc.SampleDesc.Count = 1;
+	internalSwapchainDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+	internalSwapchainDesc.Windowed = TRUE;
+
+	IDXGIFactory1 * factory;
+	HRESULT hresult = CreateDXGIFactory1( IID_PPV_ARGS( &factory ) );
+	if ( hresult != S_OK ) {
+		return VK_ERROR_SURFACE_LOST_KHR;
+	}
+	IDXGIAdapter1 * adapter;
+	hresult = factory->EnumAdapters1( 0, &adapter );
+	factory->Release();
+	if ( hresult != S_OK ) {
+		return VK_ERROR_SURFACE_LOST_KHR;
+	}
+	hresult = D3D11CreateDeviceAndSwapChain( adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0, D3D11_SDK_VERSION, &internalSwapchainDesc, &swapchain->internalSwapchain, NULL, NULL, NULL );
+	adapter->Release();
+	if ( hresult != S_OK ) {
+		return VK_ERROR_SURFACE_LOST_KHR;
+	}
+	hresult = swapchain->internalSwapchain->GetBuffer( 0, IID_PPV_ARGS( &swapchain->internalBackbuffer ) );
+	if ( hresult != S_OK ) {
+		swapchain->internalSwapchain->Release();
+		return VK_ERROR_SURFACE_LOST_KHR;
+	}
+	HDC backbufferDC;
+	swapchain->internalBackbuffer->GetDC( TRUE, &backbufferDC );
+	Swapchain_InitializePresentTiming( swapchain );
+	swapchain->pInternalImages = reinterpret_cast< VkInternalImage_t * >( pAllocator->pfnAllocation( pAllocator->pUserData, sizeof( VkInternalImage_t ) * swapchain->imageCount, 4, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE ) );
+	for ( uint32 i = 0; i < swapchain->imageCount; i++ ) {
+		VkInternalImage_t * currentImage = &swapchain->pInternalImages[ i ];
+		currentImage->dc = CreateCompatibleDC( backbufferDC );
+		currentImage->bitmap = CreateBitmap( swapchain->extent.width, swapchain->extent.height, 1, 32, NULL );
+		SelectObject( currentImage->dc, currentImage->bitmap );
+	}
+	uint32 * bits = new uint32[ swapchain->extent.width * swapchain->extent.height ];
+	uint32 color = 0xFF00FF00;
+	for ( uint32 row = 0; row < swapchain->extent.height; row++ ) {
+		for ( uint32 column = 0; column < swapchain->extent.width; column++ ) {
+			bits[ row * swapchain->extent.width + column ] = color;
+		}
+	}
+	SetBitmapBits( swapchain->pInternalImages[ 0 ].bitmap, swapchain->extent.width * swapchain->extent.height * sizeof( uint32 ), bits );
+	BitBlt( backbufferDC, 0, 0, swapchain->extent.width, swapchain->extent.height, swapchain->pInternalImages[ 0 ].dc, 0, 0, SRCCOPY );
+	swapchain->internalBackbuffer->ReleaseDC( NULL );
+	swapchain->internalSwapchain->Present( 1, 0 );
 
 	VkImageCreateInfo imageCreateInfo;
 	memset( &imageCreateInfo, 0, sizeof( imageCreateInfo ) );
@@ -894,7 +980,8 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR( VkDevice vDevice, const VkSwapchainCre
 	swapchain->presentMode = pCreateInfo->presentMode;
 	swapchain->imageCount = pCreateInfo->minImageCount;
 	swapchain->imageUsage = pCreateInfo->imageUsage;
-	Swapchain_Init( swapchain, allocator, vDevice );
+	VkResult result = Swapchain_Init( swapchain, allocator, vDevice, surface );
+	VK_ASSERT_SUBCALL( result );
 	*pSwapchain = reinterpret_cast< VkSwapchainKHR >( ENCODE_OBJECT_HANDLE( handleClass_t::SWAPCHAIN, baseHandle ) );
 
 	return VK_SUCCESS;
@@ -902,6 +989,10 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR( VkDevice vDevice, const VkSwapchainCre
 VK_VALIDATION_FAILED_LABEL:
 	device->currentSwapchainHandle--;
 	return VK_ERROR_VALIDATION_FAILED_EXT;
+
+VK_SUBCALL_FAILED_LABEL:
+	device->currentSwapchainHandle--;
+	return result;
 }
 
 VK_ICD_EXPORT PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr( VkInstance instance, const char * pName ) {
